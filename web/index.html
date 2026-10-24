@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Commerce Risk & Operations</title>
+  <style>
+    :root { color-scheme: dark; font: 15px/1.5 system-ui, sans-serif; background: #0d1523; color: #e9f0fa; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 1rem; border-bottom: 1px solid #304053; padding: 1rem 2rem; background: #111e30; }
+    h1 { font-size: 1.2rem; margin: 0; } h2 { margin: 0 0 1rem; font-size: 1.1rem; }
+    main { max-width: 1260px; margin: auto; padding: 2rem; }
+    .grid { display: grid; grid-template-columns: 2fr 1fr; gap: 1rem; }
+    .panel { background: #17263a; border: 1px solid #304053; border-radius: 12px; padding: 1.2rem; margin-bottom: 1rem; }
+    .muted { color: #a7b9ce; } .error { color: #ff9c9c; }
+    button, input, select { font: inherit; border-radius: 7px; padding: .55rem .7rem; }
+    button { color: #0d1523; background: #77d6c2; border: 0; cursor: pointer; font-weight: 650; }
+    button.secondary { color: #e9f0fa; background: #304053; }
+    input, select { background: #0d1523; border: 1px solid #43576f; color: #e9f0fa; }
+    form { display: flex; flex-wrap: wrap; gap: .6rem; align-items: end; }
+    label { display: grid; gap: .3rem; }
+    table { width: 100%; border-collapse: collapse; } th, td { text-align: left; padding: .65rem .4rem; border-bottom: 1px solid #304053; }
+    tr[data-id] { cursor: pointer; } tr[data-id]:hover { background: #223750; }
+    .badge { border-radius: 50px; padding: .2rem .55rem; background: #5e3541; color: #ffd2d2; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #0d1523; padding: 1rem; border-radius: 8px; }
+    #dashboard { display: none; } #login-panel { max-width: 580px; margin: 4rem auto; }
+    @media (max-width: 850px) { .grid { grid-template-columns: 1fr; } header, main { padding: 1rem; } table { font-size: .83rem; } }
+  </style>
+</head>
+<body>
+  <header><h1>Commerce Risk & Operations Intelligence</h1><div><span id="identity" class="muted"></span> <button id="logout" class="secondary" hidden>Sign out</button></div></header>
+  <main>
+    <section id="login-panel" class="panel">
+      <h2>Investigator sign in</h2>
+      <p class="muted">Choose the organization associated with your account.</p>
+      <form id="login-form">
+        <label>Organization <input name="tenant_id" value="north-shop" required></label>
+        <label>Email <input name="email" type="email" value="admin@north.test" required></label>
+        <label>Password <input name="password" type="password" required></label>
+        <button>Sign in</button>
+      </form>
+      <p id="login-error" class="error" role="alert"></p>
+    </section>
+    <section id="dashboard">
+      <div class="panel"><h2>Live operations</h2><p id="summary" class="muted">Loading…</p><button id="refresh" class="secondary">Refresh</button> <a id="export" href="#" style="color:#77d6c2">Export my orders</a></div>
+      <div class="grid">
+        <div>
+          <section class="panel"><h2>Alerts</h2><table><thead><tr><th>Rule</th><th>Order</th><th>Severity</th><th>Status</th><th>Time</th></tr></thead><tbody id="alerts"></tbody></table></section>
+          <section class="panel"><h2>Orders</h2><table><thead><tr><th>Order</th><th>Market</th><th>Amount</th><th>Payment</th><th>Shipment</th></tr></thead><tbody id="orders"></tbody></table></section>
+        </div>
+        <div>
+          <section class="panel"><h2>Investigation</h2><p id="investigation-empty" class="muted">Select an alert to inspect its evidence.</p><div id="investigation" hidden><p id="alert-title"></p><pre id="evidence"></pre><label>Status <select id="alert-status"><option>open</option><option>investigating</option><option>closed</option></select></label><br><button id="save-status">Save status</button></div></section>
+          <section class="panel"><h2>Sales by market</h2><div id="analytics" class="muted">Loading…</div></section>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script>
+    let token = null, activeAlert = null;
+    const el = id => document.getElementById(id);
+    async function api(path, options = {}) {
+      const response = await fetch(path, { ...options, headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json', ...(options.headers || {}) } });
+      if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || `HTTP ${response.status}`);
+      return response.json();
+    }
+    function cell(row, value) { const td = document.createElement('td'); td.textContent = value ?? '—'; row.append(td); }
+    async function refresh() {
+      try {
+        const [alerts, orders, analytics] = await Promise.all([api('/api/alerts'), api('/api/orders'), api('/api/analytics')]);
+        el('summary').textContent = `${alerts.length} recent alerts · ${orders.length} recent orders · refreshed ${new Date().toLocaleTimeString()}`;
+        el('alerts').replaceChildren();
+        for (const alert of alerts) {
+          const row = document.createElement('tr'); row.dataset.id = alert.alert_id;
+          for (const value of [alert.rule, alert.order_id, alert.severity, alert.status, new Date(alert.created_at).toLocaleString()]) cell(row, value);
+          row.addEventListener('click', () => inspect(alert.alert_id)); el('alerts').append(row);
+        }
+        el('orders').replaceChildren();
+        for (const order of orders) { const row = document.createElement('tr'); for (const value of [order.order_id, order.market, `${order.amount ?? '—'} ${order.currency ?? ''}`, order.payment_status, order.shipment_status]) cell(row, value); el('orders').append(row); }
+        el('analytics').replaceChildren();
+        for (const item of analytics) { const p = document.createElement('p'); p.textContent = `${item.market}: ${item.orders} orders · ${item.gross} gross`; el('analytics').append(p); }
+        if (!analytics.length) el('analytics').textContent = 'Waiting for order facts.';
+      } catch (error) { el('summary').textContent = error.message; }
+    }
+    async function inspect(id) {
+      try {
+        const alert = await api('/api/alerts/' + encodeURIComponent(id)); activeAlert = id;
+        el('investigation-empty').hidden = true; el('investigation').hidden = false;
+        el('alert-title').textContent = `${alert.rule} · ${alert.order_id}`;
+        el('evidence').textContent = JSON.stringify(alert.evidence, null, 2);
+        el('alert-status').value = alert.status;
+      } catch (error) { el('summary').textContent = error.message; }
+    }
+    el('login-form').addEventListener('submit', async event => {
+      event.preventDefault(); el('login-error').textContent = '';
+      const form = new FormData(event.target);
+      try {
+        const response = await fetch('/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.fromEntries(form)) });
+        if (!response.ok) throw new Error('Invalid organization, email or password');
+        token = (await response.json()).access_token;
+        const me = await api('/api/me'); el('identity').textContent = `${me.tenant_id} · ${me.role}`;
+        el('login-panel').hidden = true; el('dashboard').style.display = 'block'; el('logout').hidden = false;
+        await refresh();
+      } catch (error) { el('login-error').textContent = error.message; }
+    });
+    el('logout').addEventListener('click', () => { token = null; activeAlert = null; el('login-panel').hidden = false; el('dashboard').style.display = 'none'; el('logout').hidden = true; el('identity').textContent = ''; });
+    el('refresh').addEventListener('click', refresh);
+    el('save-status').addEventListener('click', async () => { if (!activeAlert) return; try { await api('/api/alerts/' + encodeURIComponent(activeAlert) + '/status', { method: 'PATCH', body: JSON.stringify({ status: el('alert-status').value }) }); await refresh(); } catch (error) { el('summary').textContent = error.message; } });
+    el('export').addEventListener('click', async event => { event.preventDefault(); try { const response = await fetch('/api/export/orders.csv', { headers: { Authorization: 'Bearer ' + token } }); if (!response.ok) throw new Error('Export failed'); const blob = await response.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'orders.csv'; a.click(); URL.revokeObjectURL(url); } catch (error) { el('summary').textContent = error.message; } });
+  </script>
+</body>
+</html>

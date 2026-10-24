@@ -1,0 +1,6 @@
+fastapi==0.115.12
+uvicorn==0.34.2
+psycopg[binary]==3.2.9
+clickhouse-connect==0.8.18
+elasticsearch==8.17.2
+confluent-kafka==2.8.2

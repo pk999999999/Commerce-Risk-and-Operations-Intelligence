@@ -1,0 +1,10 @@
+FROM apache/airflow:2.10.5-python3.11
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends openjdk-17-jre-headless && rm -rf /var/lib/apt/lists/*
+USER airflow
+RUN pip install --no-cache-dir pyspark==3.5.7 'psycopg[binary]==3.2.9' clickhouse-connect==0.8.18 elasticsearch==8.17.2
+ENV PYTHONPATH=/opt/project JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+COPY --chown=airflow:root app /opt/project/app
+COPY --chown=airflow:root jobs /opt/project/jobs
+COPY --chown=airflow:root dags /opt/airflow/dags
+CMD ["airflow", "standalone"]
