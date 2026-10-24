@@ -28,7 +28,7 @@ Data volumes persist across restarts. `docker compose down` stops services; `doc
 | Tenant onboarding CLI, roles, API keys, quotas, audit, configuration history | Implemented; Docker runtime unverified |
 | Production TLS, least-privilege roles, RLS, full deletion, observability, cloud adapters, Storm, Flume | Planned |
 
-The [load-test report](docs/LOAD_TEST.md) records the unmeasured status and a reproducible measurement plan. No scale target is claimed.
+The [load-test report](docs/LOAD_TEST.md) records the unmeasured status and a reproducible measurement plan. No scale target is claimed. CI runs unit checks and a Python dependency audit on pushes and pull requests.
 
 ## Software licenses
 

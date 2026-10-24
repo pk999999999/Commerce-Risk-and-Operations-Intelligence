@@ -78,7 +78,7 @@
         el('orders').replaceChildren();
         for (const order of orders) { const row = document.createElement('tr'); for (const value of [order.order_id, order.market, `${order.amount ?? '—'} ${order.currency ?? ''}`, order.payment_status, order.shipment_status]) cell(row, value); el('orders').append(row); }
         el('analytics').replaceChildren();
-        for (const item of analytics) { const p = document.createElement('p'); p.textContent = `${item.market}: ${item.orders} orders · ${item.gross} gross`; el('analytics').append(p); }
+        for (const item of analytics) { const p = document.createElement('p'); p.textContent = `${item.market}: ${item.orders} orders · ${item.gross} ${item.currency} gross`; el('analytics').append(p); }
         if (!analytics.length) el('analytics').textContent = 'Waiting for order facts.';
       } catch (error) { el('summary').textContent = error.message; }
     }

@@ -1,6 +1,7 @@
 .env
 .venv/
 .deps/
+.auditdeps/
 __pycache__/
 .pytest_cache/
 *.py[cod]

@@ -15,9 +15,10 @@ CREATE TABLE IF NOT EXISTS commerce.daily_metrics (
   tenant_id String,
   day Date,
   market LowCardinality(String),
+  currency LowCardinality(String),
   order_count UInt64,
   gross_amount Decimal(18, 2),
   version UInt64
 ) ENGINE = ReplacingMergeTree(version)
 PARTITION BY toYYYYMM(day)
-ORDER BY (tenant_id, day, market);
+ORDER BY (tenant_id, day, market, currency);

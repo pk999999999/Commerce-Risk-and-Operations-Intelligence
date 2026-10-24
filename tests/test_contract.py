@@ -1,9 +1,12 @@
 import os
 import json
+from pathlib import Path
 import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
+
+from jsonschema import Draft202012Validator, FormatChecker
 
 from app.auth import make_token, password_hash, read_token, verify_password
 from app.core import alert_id, alerts_for_event, validate_event, validate_kafka_record
@@ -63,8 +66,11 @@ class ContractTests(unittest.TestCase):
         events = generate(24)
         self.assertEqual(events, generate(24))
         self.assertNotEqual(events[0]["event_id"], generate(24, run_id="another-run")[0]["event_id"])
+        schema = json.loads((Path(__file__).resolve().parents[1] / "schemas" / "event-v1.schema.json").read_text(encoding="utf-8"))
+        validator = Draft202012Validator(schema, format_checker=FormatChecker())
         for event in events:
             validate_event(event)
+            validator.validate(event)
         self.assertEqual({e["tenant_id"] for e in events}, {"north-shop", "harbor-store"})
         self.assertEqual({e["market"] for e in events}, {"US", "IN", "GB"})
         self.assertEqual({e["event_type"] for e in events}, {"order", "payment", "shipment", "inventory", "application"})

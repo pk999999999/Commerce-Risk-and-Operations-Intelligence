@@ -28,9 +28,23 @@ flowchart LR
 
 Every event has a tenant ID in its key and payload. The generator uses `tenant_id:entity_id` as the Kafka key. The processor checks registered tenant and market IDs before processing. Operational tables use composite tenant keys. Every API query receives tenant context from a verified bearer token or hashed API key; client-supplied tenant IDs are ignored. Search and analytics queries always include the authenticated tenant. A cross-tenant API test is mandatory before release. Kafka topic ACLs and physical tenant separation are planned deployment controls; the shared local broker does not provide them.
 
+## Data model
+
+PostgreSQL owns `tenants`, `markets`, `users`, `api_keys`, versioned `tenant_config` and `market_rules`, `processed_events`, `orders`, `alerts`, `audit_logs`, `usage_daily`, and `api_rate_windows`. `orders`, `alerts`, and processed events use tenant-aware keys. ClickHouse has a latest-version `order_facts` table and versioned `daily_metrics` keyed by tenant, day, market, and currency. Elasticsearch indexes alerts under deterministic `tenant_id:alert_id` document IDs. Raw and curated lake layers are Parquet files; raw is replayable and curated is a derived view.
+
+## Repository structure
+
+| Path | Purpose |
+|---|---|
+| `app/`, `web/` | Contract, authentication, operational store, API, generator, browser UI |
+| `jobs/`, `dags/` | Spark stream, batch reconciliation, Airflow schedule |
+| `sql/`, `schemas/` | Store initialization and versioned event schema |
+| `tests/` | Contract checks and opt-in live isolation/replay checks |
+| `docs/` | Architecture, operations, load-test evidence |
+
 ## Data contract
 
-`schema_version` is `1`; required fields are `event_id` (UUID), `tenant_id` (slug), `market` (ISO country code), `event_type`, `occurred_at` (UTC ISO 8601), and object `payload`. An `order` payload has `order_id`, `amount`, `currency`, and `email`; payment has `order_id`, `status`, `amount`; shipment has `order_id`, `status`, `eta_at`; inventory has `sku`, `available`; application has `level`, `message`. Unknown additive payload fields are allowed. Breaking changes require a new schema version and a parallel consumer rollout. Invalid records go to a dead-letter Parquet path with validation reason. Late records beyond 48 hours are retained in raw storage and reconciled in batch.
+`schema_version` is `1`; required fields are `event_id` (UUID), `tenant_id` (slug), `market` (ISO country code), `event_type`, `occurred_at` (UTC ISO 8601), and object `payload`. The machine-readable contract is [`schemas/event-v1.schema.json`](../schemas/event-v1.schema.json). An `order` payload has `order_id`, `amount`, `currency`, and `email`; payment has `order_id`, `status`, `amount`; shipment has `order_id`, `status`, `eta_at`; inventory has `sku`, `available`; application has `level`, `message`. Unknown additive payload fields are allowed. Breaking changes require a new schema version and a parallel consumer rollout. Invalid records go to a dead-letter Parquet path with validation reason. Late records beyond 48 hours are retained in raw storage and reconciled in batch.
 
 ## Idempotency and recovery
 

@@ -49,21 +49,29 @@ def main() -> None:
         .withColumn("event_id", F.get_json_object("value", "$.event_id"))
         .withColumn("event_type", F.get_json_object("value", "$.event_type"))
         .withColumn("market", F.get_json_object("value", "$.market"))
+        .withColumn("currency", F.get_json_object("value", "$.payload.currency"))
         .withColumn("order_id", F.get_json_object("value", "$.payload.order_id"))
         .withColumn("amount", F.get_json_object("value", "$.payload.amount").cast(T.DecimalType(18, 2)))
         .withColumn("event_time", F.to_timestamp(F.get_json_object("value", "$.occurred_at")))
         .dropDuplicates(["tenant_id", "event_id"]))
+    with connect() as db:
+        allowed = [(row["tenant_id"], row["code"]) for row in db.execute("SELECT tenant_id,code FROM markets")]
+    if not allowed:
+        LOG.info("No registered markets; nothing to reconcile")
+        return
+    allowed_df = spark.createDataFrame(allowed, ["tenant_id", "market"])
+    events = events.join(F.broadcast(allowed_df), ["tenant_id", "market"], "inner")
     # PostgreSQL's event key makes replay safe; ClickHouse ReplacingMergeTree repairs
     # a stream microbatch that committed PostgreSQL before its analytics insert.
     events.select("value").rdd.foreachPartition(process_partition)
     orders = events.filter(F.col("event_type") == "order")
     latest = orders.withColumn("rank", F.row_number().over(Window.partitionBy("tenant_id", "order_id").orderBy(F.col("event_time").desc(), F.col("event_id").desc()))).filter("rank = 1")
-    daily = latest.groupBy("tenant_id", F.to_date("event_time").alias("day"), "market").agg(F.count("order_id").alias("order_count"), F.sum("amount").alias("gross_amount"))
+    daily = latest.groupBy("tenant_id", F.to_date("event_time").alias("day"), "market", "currency").agg(F.count("order_id").alias("order_count"), F.sum("amount").alias("gross_amount"))
     rows = daily.collect()
     ch = clickhouse_connect.get_client(host=os.getenv("CLICKHOUSE_HOST", "clickhouse"), username="commerce", password=os.environ["CLICKHOUSE_PASSWORD"])
     version = int(time.time() * 1000)
     if rows:
-        ch.insert("commerce.daily_metrics", [[r.tenant_id, r.day, r.market, r.order_count, r.gross_amount, version] for r in rows], column_names=["tenant_id", "day", "market", "order_count", "gross_amount", "version"])
+        ch.insert("commerce.daily_metrics", [[r.tenant_id, r.day, r.market, r.currency, r.order_count, r.gross_amount, version] for r in rows], column_names=["tenant_id", "day", "market", "currency", "order_count", "gross_amount", "version"])
     indexed = rebuild_search()
     LOG.info("reconciliation_complete groups=%s alerts_indexed=%s", len(rows), indexed)
     spark.stop()

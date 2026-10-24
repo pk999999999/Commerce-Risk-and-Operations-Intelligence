@@ -40,9 +40,14 @@ class AlertStatus(BaseModel):
 
 
 class NewUser(BaseModel):
-    email: str
+    email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=12)
     role: str = Field(pattern="^(admin|investigator|viewer)$")
+
+
+class ChangeUser(BaseModel):
+    role: str | None = Field(default=None, pattern="^(admin|investigator|viewer)$")
+    active: bool | None = None
 
 
 class NewConfig(BaseModel):
@@ -185,15 +190,15 @@ def orders(limit: int = 50, user: dict = Depends(principal)):
 @app.get("/api/analytics")
 def analytics(user: dict = Depends(principal)):
     ch = clickhouse_connect.get_client(host=os.getenv("CLICKHOUSE_HOST", "clickhouse"), username="commerce", password=os.environ["CLICKHOUSE_PASSWORD"])
-    result = ch.query("SELECT market, count() AS orders, sum(amount) AS gross FROM commerce.order_facts FINAL WHERE tenant_id = {tenant:String} GROUP BY market ORDER BY market", parameters={"tenant": user["tenant_id"]})
-    return [{"market": row[0], "orders": row[1], "gross": str(row[2])} for row in result.result_rows]
+    result = ch.query("SELECT market, currency, count() AS orders, sum(amount) AS gross FROM commerce.order_facts FINAL WHERE tenant_id = {tenant:String} GROUP BY market, currency ORDER BY market, currency", parameters={"tenant": user["tenant_id"]})
+    return [{"market": row[0], "currency": row[1], "orders": row[2], "gross": str(row[3])} for row in result.result_rows]
 
 
 @app.get("/api/analytics/daily")
 def daily_analytics(user: dict = Depends(principal)):
     ch = clickhouse_connect.get_client(host=os.getenv("CLICKHOUSE_HOST", "clickhouse"), username="commerce", password=os.environ["CLICKHOUSE_PASSWORD"])
-    result = ch.query("SELECT day, market, order_count, gross_amount FROM commerce.daily_metrics FINAL WHERE tenant_id = {tenant:String} ORDER BY day DESC, market LIMIT 100", parameters={"tenant": user["tenant_id"]})
-    return [{"day": str(row[0]), "market": row[1], "orders": row[2], "gross": str(row[3])} for row in result.result_rows]
+    result = ch.query("SELECT day, market, currency, order_count, gross_amount FROM commerce.daily_metrics FINAL WHERE tenant_id = {tenant:String} ORDER BY day DESC, market, currency LIMIT 100", parameters={"tenant": user["tenant_id"]})
+    return [{"day": str(row[0]), "market": row[1], "currency": row[2], "orders": row[3], "gross": str(row[4])} for row in result.result_rows]
 
 
 @app.get("/api/export/orders.csv")
@@ -210,11 +215,44 @@ def export_orders(user: dict = Depends(principal)):
 @app.post("/api/admin/users")
 def add_user(body: NewUser, user: dict = Depends(principal)):
     require_role(user, {"admin"})
+    if "@" not in body.email:
+        raise HTTPException(400, "invalid email")
     with connect() as db:
         with db.cursor() as cur:
             cur.execute("INSERT INTO users (tenant_id,email,password_hash,role) VALUES (%s,%s,%s,%s) RETURNING id,email,role", (user["tenant_id"], body.email, password_hash(body.password), body.role))
             row = cur.fetchone()
             audit(cur, user, "user.create", body.email, {"role": body.role})
+    return row
+
+
+@app.get("/api/admin/users")
+def list_users(user: dict = Depends(principal)):
+    require_role(user, {"admin"})
+    with connect() as db:
+        return db.execute("SELECT id,email,role,active FROM users WHERE tenant_id=%s ORDER BY id", (user["tenant_id"],)).fetchall()
+
+
+@app.patch("/api/admin/users/{user_id}")
+def change_user(user_id: int, body: ChangeUser, user: dict = Depends(principal)):
+    require_role(user, {"admin"})
+    if body.role is None and body.active is None:
+        raise HTTPException(400, "no changes supplied")
+    with connect() as db:
+        with db.cursor() as cur:
+            cur.execute("SELECT id FROM tenants WHERE id=%s FOR UPDATE", (user["tenant_id"],))
+            cur.execute("SELECT email,role,active FROM users WHERE tenant_id=%s AND id=%s FOR UPDATE", (user["tenant_id"], user_id))
+            target = cur.fetchone()
+            if not target:
+                raise HTTPException(404, "user not found")
+            if target["email"] == user["actor"]:
+                raise HTTPException(400, "cannot change own access")
+            if target["role"] == "admin" and target["active"] and (body.active is False or (body.role is not None and body.role != "admin")):
+                cur.execute("SELECT count(*) AS active_admins FROM users WHERE tenant_id=%s AND role='admin' AND active=true", (user["tenant_id"],))
+                if cur.fetchone()["active_admins"] <= 1:
+                    raise HTTPException(400, "cannot remove last active admin")
+            cur.execute("UPDATE users SET role=COALESCE(%s,role),active=COALESCE(%s,active) WHERE tenant_id=%s AND id=%s RETURNING id,email,role,active", (body.role, body.active, user["tenant_id"], user_id))
+            row = cur.fetchone()
+            audit(cur, user, "user.update", str(user_id), body.model_dump(exclude_none=True))
     return row
 
 

@@ -55,6 +55,8 @@ def validate_event(event: object) -> dict:
         if not isinstance(payload["order_id"], str) or not 1 <= len(payload["order_id"]) <= 128:
             raise ValueError("invalid order_id")
     if event_type in {"order", "payment"}:
+        if isinstance(payload["amount"], bool) or not isinstance(payload["amount"], (int, float)):
+            raise ValueError("amount must be a JSON number")
         try:
             amount = Decimal(str(payload["amount"]))
             if not amount.is_finite() or amount < 0 or amount > Decimal("1000000000000"):
