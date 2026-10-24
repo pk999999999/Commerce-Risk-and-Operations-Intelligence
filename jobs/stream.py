@@ -1,24 +1,25 @@
 """Kafka -> validated lake, PostgreSQL, ClickHouse and Elasticsearch."""
 from __future__ import annotations
 
-from datetime import datetime
+from decimal import Decimal
 import json
 import logging
 import os
 
 from pyspark.sql import SparkSession, functions as F, types as T
 
-from app.core import parse_time, validate_event
+from app.core import parse_time, validate_kafka_record
+from app.lake import LakePaths
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 LOG = logging.getLogger("commerce.stream")
-LAKE = os.getenv("LAKE_PATH", "/opt/project/lake")
+LAKE = LakePaths.from_env()
 CHECKPOINTS = os.getenv("CHECKPOINT_PATH", "/opt/project/checkpoints")
 
 
-def validation_error(value: str) -> str | None:
+def validation_error(value: str, key: str) -> str | None:
     try:
-        validate_event(json.loads(value))
+        validate_kafka_record(key, value)
         return None
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         return str(exc)
@@ -27,11 +28,11 @@ def validation_error(value: str) -> str | None:
 def archive_batch(batch, batch_id: int) -> None:
     if batch.isEmpty():
         return
-    batch.select("key", "value", "kafka_timestamp").write.mode("append").parquet(f"{LAKE}/raw")
+    batch.select("key", "value", "kafka_timestamp").write.mode("append").parquet(LAKE.path("raw"))
     error_udf = F.udf(validation_error, T.StringType())
-    rejected = batch.withColumn("reason", error_udf("value")).filter(F.col("reason").isNotNull())
+    rejected = batch.withColumn("reason", error_udf("value", "key")).filter(F.col("reason").isNotNull())
     if not rejected.isEmpty():
-        rejected.select("key", "value", "kafka_timestamp", "reason").write.mode("append").parquet(f"{LAKE}/dead_letter")
+        rejected.select("key", "value", "kafka_timestamp", "reason").write.mode("append").parquet(LAKE.path("dead_letter"))
 
 
 def process_partition(rows) -> None:
@@ -56,19 +57,21 @@ def process_partition(rows) -> None:
         if event["event_type"] == "order":
             payload = event["payload"]
             at = parse_time(event["occurred_at"])
-            ch.insert("commerce.order_facts", [[event["tenant_id"], payload["order_id"], event["market"], str(payload["amount"]), payload["currency"], at, int(at.timestamp() * 1000)]], column_names=["tenant_id", "order_id", "market", "amount", "currency", "order_at", "version"])
+            ch.insert("commerce.order_facts", [[event["tenant_id"], payload["order_id"], event["market"], Decimal(str(payload["amount"])), payload["currency"], at, int(at.timestamp() * 1000)]], column_names=["tenant_id", "order_id", "market", "amount", "currency", "order_at", "version"])
 
 
 def process_batch(batch, batch_id: int) -> None:
     if batch.isEmpty():
         return
-    batch.select("value", "tenant_id", "event_type", "event_time").write.mode("append").partitionBy("tenant_id", "event_type").parquet(f"{LAKE}/curated")
+    batch.select("value", "tenant_id", "event_type", "event_time").write.mode("append").partitionBy("tenant_id", "event_type").parquet(LAKE.path("curated"))
     batch.select("value").rdd.foreachPartition(process_partition)
     LOG.info("processed_batch id=%s count=%s", batch_id, batch.count())
 
 
 def main() -> None:
-    spark = SparkSession.builder.appName("commerce-risk-stream").config("spark.sql.shuffle.partitions", "3").getOrCreate()
+    spark = (SparkSession.builder.appName("commerce-risk-stream")
+        .config("spark.sql.shuffle.partitions", "3")
+        .config("spark.sql.session.timeZone", "UTC").getOrCreate())
     spark.sparkContext.setLogLevel("WARN")
     source = (spark.readStream.format("kafka")
         .option("kafka.bootstrap.servers", os.getenv("KAFKA_BOOTSTRAP", "kafka:9092"))
@@ -78,7 +81,7 @@ def main() -> None:
     decoded = source.selectExpr("CAST(key AS STRING) AS key", "CAST(value AS STRING) AS value", "timestamp AS kafka_timestamp")
     raw_query = decoded.writeStream.foreachBatch(archive_batch).option("checkpointLocation", f"{CHECKPOINTS}/raw").start()
     valid_udf = F.udf(validation_error, T.StringType())
-    valid = (decoded.withColumn("validation_error", valid_udf("value"))
+    valid = (decoded.withColumn("validation_error", valid_udf("value", "key"))
         .filter(F.col("validation_error").isNull())
         .withColumn("tenant_id", F.get_json_object("value", "$.tenant_id"))
         .withColumn("event_id", F.get_json_object("value", "$.event_id"))

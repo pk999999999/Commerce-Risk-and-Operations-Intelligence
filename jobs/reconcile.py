@@ -11,12 +11,13 @@ from elasticsearch import Elasticsearch
 from pyspark.sql import SparkSession, Window, functions as F, types as T
 
 from app.core import validate_event
+from app.lake import LakePaths
 from app.store import connect
 from jobs.stream import process_partition, validation_error
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 LOG = logging.getLogger("commerce.reconcile")
-LAKE = os.getenv("LAKE_PATH", "/opt/project/lake")
+LAKE = LakePaths.from_env()
 
 
 def rebuild_search() -> int:
@@ -30,10 +31,11 @@ def rebuild_search() -> int:
 
 
 def main() -> None:
-    spark = SparkSession.builder.master("local[2]").appName("commerce-daily-reconciliation").getOrCreate()
+    spark = (SparkSession.builder.master("local[2]").appName("commerce-daily-reconciliation")
+        .config("spark.sql.session.timeZone", "UTC").getOrCreate())
     spark.sparkContext.setLogLevel("WARN")
     try:
-        raw = spark.read.parquet(f"{LAKE}/raw")
+        raw = spark.read.parquet(LAKE.path("raw"))
     except Exception as exc:
         if "PATH_NOT_FOUND" in str(exc) or "does not exist" in str(exc):
             LOG.info("No raw events yet; nothing to reconcile")
@@ -41,7 +43,7 @@ def main() -> None:
         raise
     valid_udf = F.udf(validation_error, T.StringType())
     events = (raw.filter(F.col("value").isNotNull())
-        .withColumn("validation_error", valid_udf("value"))
+        .withColumn("validation_error", valid_udf("value", "key"))
         .filter(F.col("validation_error").isNull())
         .withColumn("tenant_id", F.get_json_object("value", "$.tenant_id"))
         .withColumn("event_id", F.get_json_object("value", "$.event_id"))

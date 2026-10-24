@@ -55,6 +55,10 @@ class NewKey(BaseModel):
     role: str = Field(pattern="^(admin|investigator|viewer)$")
 
 
+class NewMarketRule(BaseModel):
+    fraud_amount: Decimal = Field(gt=0, le=1_000_000_000)
+
+
 def principal(authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)) -> dict:
     with connect() as db:
         with db.cursor() as cur:
@@ -78,6 +82,9 @@ def principal(authorization: str | None = Header(default=None), x_api_key: str |
             else:
                 raise HTTPException(401, "authentication required")
             tenant = row["tenant_id"]
+            cur.execute("INSERT INTO api_rate_windows (tenant_id,window_start,request_count) VALUES (%s,date_trunc('minute',now()),1) ON CONFLICT (tenant_id,window_start) DO UPDATE SET request_count=api_rate_windows.request_count+1 RETURNING request_count", (tenant,))
+            if cur.fetchone()["request_count"] > 120:
+                raise HTTPException(429, "rate limit exceeded")
             cur.execute("INSERT INTO usage_daily (tenant_id,day,api_count) VALUES (%s,current_date,1) ON CONFLICT (tenant_id,day) DO UPDATE SET api_count=usage_daily.api_count+1 RETURNING api_count", (tenant,))
             used = cur.fetchone()["api_count"]
             cur.execute("SELECT daily_event_quota FROM tenant_config WHERE tenant_id=%s ORDER BY version DESC LIMIT 1", (tenant,))
@@ -145,7 +152,11 @@ def search_alerts(q: str, user: dict = Depends(principal)):
 @app.get("/api/alerts/{alert_id}")
 def alert_detail(alert_id: str, user: dict = Depends(principal)):
     with connect() as db:
-        row = db.execute("SELECT alert_id,order_id,rule,severity,status,evidence,created_at,updated_at FROM alerts WHERE tenant_id=%s AND alert_id=%s", (user["tenant_id"], alert_id)).fetchone()
+        with db.cursor() as cur:
+            cur.execute("SELECT alert_id,order_id,rule,severity,status,evidence,created_at,updated_at FROM alerts WHERE tenant_id=%s AND alert_id=%s", (user["tenant_id"], alert_id))
+            row = cur.fetchone()
+            if row:
+                audit(cur, user, "alert.view", alert_id)
     if not row:
         raise HTTPException(404, "alert not found")
     return row
@@ -178,6 +189,13 @@ def analytics(user: dict = Depends(principal)):
     return [{"market": row[0], "orders": row[1], "gross": str(row[2])} for row in result.result_rows]
 
 
+@app.get("/api/analytics/daily")
+def daily_analytics(user: dict = Depends(principal)):
+    ch = clickhouse_connect.get_client(host=os.getenv("CLICKHOUSE_HOST", "clickhouse"), username="commerce", password=os.environ["CLICKHOUSE_PASSWORD"])
+    result = ch.query("SELECT day, market, order_count, gross_amount FROM commerce.daily_metrics FINAL WHERE tenant_id = {tenant:String} ORDER BY day DESC, market LIMIT 100", parameters={"tenant": user["tenant_id"]})
+    return [{"day": str(row[0]), "market": row[1], "orders": row[2], "gross": str(row[3])} for row in result.result_rows]
+
+
 @app.get("/api/export/orders.csv")
 def export_orders(user: dict = Depends(principal)):
     output = io.StringIO()
@@ -185,7 +203,7 @@ def export_orders(user: dict = Depends(principal)):
     writer.writerow(["order_id", "market", "amount", "currency", "order_at"])
     with connect() as db:
         for row in db.execute("SELECT order_id,market,amount,currency,order_at FROM orders WHERE tenant_id=%s ORDER BY order_id", (user["tenant_id"],)):
-            writer.writerow([row["order_id"], row["market"], row["amount"], row["currency"], row["order_at"]])
+            writer.writerow(["'" + value if isinstance(value, str) and value.startswith(("=", "+", "-", "@")) else value for value in [row["order_id"], row["market"], row["amount"], row["currency"], row["order_at"]]])
     return Response(output.getvalue(), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=orders.csv"})
 
 
@@ -212,6 +230,18 @@ def add_key(body: NewKey, user: dict = Depends(principal)):
     return {"id": row["id"], "api_key": secret}
 
 
+@app.delete("/api/admin/api-keys/{key_id}")
+def revoke_key(key_id: int, user: dict = Depends(principal)):
+    require_role(user, {"admin"})
+    with connect() as db:
+        with db.cursor() as cur:
+            cur.execute("UPDATE api_keys SET revoked_at=now() WHERE tenant_id=%s AND id=%s AND revoked_at IS NULL RETURNING id", (user["tenant_id"], key_id))
+            if not cur.fetchone():
+                raise HTTPException(404, "API key not found")
+            audit(cur, user, "api_key.revoke", str(key_id))
+    return {"revoked": True}
+
+
 @app.post("/api/admin/config")
 def add_config(body: NewConfig, user: dict = Depends(principal)):
     require_role(user, {"admin"})
@@ -230,3 +260,32 @@ def config_history(user: dict = Depends(principal)):
     require_role(user, {"admin"})
     with connect() as db:
         return db.execute("SELECT version,fraud_amount,daily_event_quota,actor,created_at FROM tenant_config WHERE tenant_id=%s ORDER BY version DESC", (user["tenant_id"],)).fetchall()
+
+
+@app.post("/api/admin/market-rules/{market}")
+def add_market_rule(market: str, body: NewMarketRule, user: dict = Depends(principal)):
+    require_role(user, {"admin"})
+    with connect() as db:
+        with db.cursor() as cur:
+            cur.execute("SELECT code FROM markets WHERE tenant_id=%s AND code=%s FOR UPDATE", (user["tenant_id"], market))
+            if not cur.fetchone():
+                raise HTTPException(404, "market not found")
+            cur.execute("SELECT COALESCE(max(version),0)+1 AS next_version FROM market_rules WHERE tenant_id=%s AND market=%s", (user["tenant_id"], market))
+            version = cur.fetchone()["next_version"]
+            cur.execute("INSERT INTO market_rules (tenant_id,market,version,fraud_amount,actor) VALUES (%s,%s,%s,%s,%s)", (user["tenant_id"], market, version, body.fraud_amount, user["actor"]))
+            audit(cur, user, "market_rule.update", market, {"version": version, "fraud_amount": str(body.fraud_amount)})
+    return {"market": market, "version": version}
+
+
+@app.get("/api/admin/market-rules")
+def market_rule_history(user: dict = Depends(principal)):
+    require_role(user, {"admin"})
+    with connect() as db:
+        return db.execute("SELECT market,version,fraud_amount,actor,created_at FROM market_rules WHERE tenant_id=%s ORDER BY market,version DESC", (user["tenant_id"],)).fetchall()
+
+
+@app.get("/api/admin/audit")
+def audit_history(user: dict = Depends(principal)):
+    require_role(user, {"admin"})
+    with connect() as db:
+        return db.execute("SELECT actor,action,subject,detail,created_at FROM audit_logs WHERE tenant_id=%s ORDER BY id DESC LIMIT 100", (user["tenant_id"],)).fetchall()

@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS processed_events (
   tenant_id TEXT NOT NULL REFERENCES tenants(id),
   event_id UUID NOT NULL,
   event_type TEXT NOT NULL,
+  payload_hash TEXT NOT NULL,
   occurred_at TIMESTAMPTZ NOT NULL,
   processed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (tenant_id, event_id)
@@ -74,6 +75,16 @@ CREATE TABLE IF NOT EXISTS tenant_config (
   actor TEXT NOT NULL,
   PRIMARY KEY (tenant_id, version)
 );
+CREATE TABLE IF NOT EXISTS market_rules (
+  tenant_id TEXT NOT NULL,
+  market TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  fraud_amount NUMERIC(18,2) NOT NULL CHECK (fraud_amount > 0),
+  actor TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, market, version),
+  FOREIGN KEY (tenant_id, market) REFERENCES markets(tenant_id, code)
+);
 CREATE TABLE IF NOT EXISTS audit_logs (
   id BIGSERIAL PRIMARY KEY,
   tenant_id TEXT NOT NULL REFERENCES tenants(id),
@@ -89,4 +100,10 @@ CREATE TABLE IF NOT EXISTS usage_daily (
   event_count BIGINT NOT NULL DEFAULT 0,
   api_count BIGINT NOT NULL DEFAULT 0,
   PRIMARY KEY (tenant_id, day)
+);
+CREATE TABLE IF NOT EXISTS api_rate_windows (
+  tenant_id TEXT NOT NULL REFERENCES tenants(id),
+  window_start TIMESTAMPTZ NOT NULL,
+  request_count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (tenant_id, window_start)
 );

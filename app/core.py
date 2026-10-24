@@ -51,15 +51,31 @@ def validate_event(event: object) -> dict:
     payload = event.get("payload")
     if not isinstance(payload, dict) or not REQUIRED[event_type].issubset(payload):
         raise ValueError("missing payload fields")
+    if event_type in {"order", "payment", "shipment"}:
+        if not isinstance(payload["order_id"], str) or not 1 <= len(payload["order_id"]) <= 128:
+            raise ValueError("invalid order_id")
     if event_type in {"order", "payment"}:
         try:
             amount = Decimal(str(payload["amount"]))
-            if not amount.is_finite() or amount < 0:
-                raise ValueError("amount must be finite and nonnegative")
+            if not amount.is_finite() or amount < 0 or amount > Decimal("1000000000000"):
+                raise ValueError("amount out of range")
         except (InvalidOperation, ValueError) as exc:
             raise ValueError("invalid amount") from exc
+    if event_type == "order":
+        if not isinstance(payload["currency"], str) or not re.fullmatch(r"[A-Z]{3}", payload["currency"]):
+            raise ValueError("invalid currency")
+        if not isinstance(payload["email"], str) or len(payload["email"]) > 320 or "@" not in payload["email"]:
+            raise ValueError("invalid email")
+    if event_type == "payment" and payload["status"] not in {"authorized", "captured", "failed", "refunded"}:
+        raise ValueError("invalid payment status")
     if event_type == "shipment":
+        if payload["status"] not in {"pending", "in_transit", "delayed", "delivered"}:
+            raise ValueError("invalid shipment status")
         parse_time(payload["eta_at"])
+    if event_type == "inventory" and (not isinstance(payload["sku"], str) or not payload["sku"] or not isinstance(payload["available"], int) or payload["available"] < 0):
+        raise ValueError("invalid inventory payload")
+    if event_type == "application" and (payload["level"] not in {"DEBUG", "INFO", "WARN", "ERROR"} or not isinstance(payload["message"], str)):
+        raise ValueError("invalid application payload")
     return event
 
 
@@ -88,3 +104,10 @@ def alerts_for_event(event: dict, fraud_amount: Decimal) -> list[dict]:
 
 def canonical_json(event: dict) -> str:
     return json.dumps(event, separators=(",", ":"), sort_keys=True)
+
+
+def validate_kafka_record(key: str, value: str) -> dict:
+    event = validate_event(json.loads(value))
+    if not key or key.split(":", 1)[0] != event["tenant_id"]:
+        raise ValueError("Kafka key tenant does not match payload tenant")
+    return event

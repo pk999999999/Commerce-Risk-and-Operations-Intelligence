@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS commerce.order_facts (
   order_at DateTime64(3, 'UTC'),
   version UInt64
 ) ENGINE = ReplacingMergeTree(version)
-PARTITION BY toYYYYMM(order_at)
+PARTITION BY cityHash64(tenant_id) % 16
 ORDER BY (tenant_id, order_id);
 
 CREATE TABLE IF NOT EXISTS commerce.daily_metrics (

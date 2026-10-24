@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-import json
+import hashlib
 import os
 
 import psycopg
@@ -10,7 +10,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from app.auth import password_hash
-from app.core import alerts_for_event, parse_time, validate_event
+from app.core import alerts_for_event, canonical_json, parse_time, validate_event
 
 
 def connect():
@@ -41,6 +41,7 @@ def process_event(event: dict) -> dict:
     tenant, market, event_type = event["tenant_id"], event["market"], event["event_type"]
     payload = event["payload"]
     at = parse_time(event["occurred_at"])
+    payload_hash = hashlib.sha256(canonical_json(event).encode()).hexdigest()
     with connect() as db:
         with db.cursor() as cur:
             cur.execute("SELECT 1 FROM markets WHERE tenant_id=%s AND code=%s", (tenant, market))
@@ -50,8 +51,14 @@ def process_event(event: dict) -> dict:
             config = cur.fetchone()
             if not config:
                 raise ValueError("missing tenant config")
-            cur.execute("INSERT INTO processed_events (tenant_id,event_id,event_type,occurred_at) VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING event_id", (tenant, event["event_id"], event_type, at))
+            cur.execute("SELECT fraud_amount FROM market_rules WHERE tenant_id=%s AND market=%s ORDER BY version DESC LIMIT 1", (tenant, market))
+            market_rule = cur.fetchone()
+            threshold = market_rule["fraud_amount"] if market_rule else config["fraud_amount"]
+            cur.execute("INSERT INTO processed_events (tenant_id,event_id,event_type,payload_hash,occurred_at) VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING event_id", (tenant, event["event_id"], event_type, payload_hash, at))
             if not cur.fetchone():
+                cur.execute("SELECT payload_hash FROM processed_events WHERE tenant_id=%s AND event_id=%s", (tenant, event["event_id"]))
+                if cur.fetchone()["payload_hash"] != payload_hash:
+                    raise ValueError("event_id reused with different payload")
                 return {"inserted": False, "alerts": []}
             cur.execute("INSERT INTO usage_daily (tenant_id,day,event_count) VALUES (%s,%s,1) ON CONFLICT (tenant_id,day) DO UPDATE SET event_count=usage_daily.event_count+1 RETURNING event_count", (tenant, at.date()))
             if cur.fetchone()["event_count"] > config["daily_event_quota"]:
@@ -82,7 +89,7 @@ def process_event(event: dict) -> dict:
                       eta_at=EXCLUDED.eta_at,updated_at=now()
                     WHERE orders.shipment_at IS NULL OR EXCLUDED.shipment_at >= orders.shipment_at
                 """, (tenant, payload["order_id"], payload["status"], at, parse_time(payload["eta_at"])))
-            alerts = alerts_for_event(event, config["fraud_amount"])
+            alerts = alerts_for_event(event, threshold)
             new_alerts = []
             for alert in alerts:
                 cur.execute("""

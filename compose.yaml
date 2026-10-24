@@ -127,6 +127,7 @@ services:
     volumes:
       - lake:/opt/project/lake:ro
       - airflowdata:/opt/airflow
+      - ./dags:/opt/airflow/dags:ro
     ports:
       - '127.0.0.1:8080:8080'
   load-generator:
